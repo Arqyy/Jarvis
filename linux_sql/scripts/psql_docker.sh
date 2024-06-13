@@ -1,96 +1,43 @@
 #!/bin/bash
 
-# Capture CLI arguments
-cmd=$1
-db_username=$2
-db_password=$3
+# Setup and validate arguments
+psql_host=$1
+psql_port=$2
+db_name=$3
+psql_user=$4
+psql_password=$5
 
-# Function to check if container exists and is running
-container_exists_and_running() {
-    docker inspect -f '{{.State.Running}}' jrvs-psql 2>/dev/null
-}
+# Check number of arguments
+if [ "$#" -ne 5 ]; then
+    echo "Illegal number of parameters"
+    echo "Usage: ./scripts/host_info.sh psql_host psql_port db_name psql_user psql_password"
+    exit 1
+fi
 
-# Check Docker service status and start if not running
-sudo systemctl is-active --quiet docker || sudo systemctl start docker
+# Save machine statistics in MB and current machine hostname to variables
+vmstat_mb=$(vmstat --unit M)
+hostname=$(hostname -f)
 
-# Check container status
-docker inspect jrvs-psql >/dev/null 2>&1
-container_status=$?
+# Retrieve hardware specification variables
+memory_free=$(echo "$vmstat_mb" | awk '{print $4}' | tail -n1 | xargs)
+cpu_idle=$(echo "$vmstat_mb" | awk '{print $15}' | tail -n1 | xargs)
+cpu_kernel=$(echo "$vmstat_mb" | awk '{print $14}' | tail -n1 | xargs)
+disk_io=$(vmstat -d | awk '{print $10}' | tail -n1 | xargs)
+disk_available=$(df -BM / | grep -v "Filesystem" | awk '{print $4}' | sed 's/[^0-9]*//g' | xargs)
 
-# Use switch case to handle create|stop|start options
-case $cmd in
-    create)
-        # Check if the container is already created
-        if [ $container_status -eq 0 ]; then
-            echo 'Error: PostgreSQL container "jrvs-psql" is already created.'
-            exit 1
-        fi
+# Current time in `2019-11-26 14:40:19` UTC format
+timestamp=$(date +"%Y-%m-%d %H:%M:%S")
 
-        # Check number of CLI arguments
-        if [ $# -ne 3 ]; then
-            echo 'Error: "create" command requires username and password.'
-            exit 1
-        fi
+# Subquery to find matching id in host_info table
+host_id="(SELECT id FROM host_info WHERE hostname='$hostname')"
 
-        # Check if username and password are provided
-        if [ -z "$db_username" ] || [ -z "$db_password" ]; then
-            echo 'Error: Username and password must be provided for container creation.'
-            exit 1
-        fi
+# PSQL command: Inserts server usage data into host_usage table
+insert_stmt="INSERT INTO host_usage (timestamp, host_id, memory_free, cpu_idle, cpu_kernel, disk_io, disk_available) VALUES ('$timestamp', $host_id, '$memory_free', '$cpu_idle', '$cpu_kernel', '$disk_io', '$disk_available');"
 
-        # Create PostgreSQL container
-        echo "Creating PostgreSQL container 'jrvs-psql'..."
-        docker volume create pgdata >/dev/null 2>&1
-        docker run -d --name jrvs-psql \
-            -e POSTGRES_USER=$db_username \
-            -e POSTGRES_PASSWORD=$db_password \
-            -p 5432:5432 \
-            postgres:latest >/dev/null 2>&1
-        echo "PostgreSQL container 'jrvs-psql' created successfully."
-        ;;
+# Set up environment variable for psql command
+export PGPASSWORD=$psql_password
 
-    start)
-        # Check if container has been created
-        if [ $container_status -ne 0 ]; then
-            echo 'Error: PostgreSQL container "jrvs-psql" is not created.'
-            exit 1
-        fi
+# Insert data into the database
+psql -h $psql_host -p $psql_port -d $db_name -U $psql_user -c "$insert_stmt"
 
-        # Check if container is already running
-        if container_exists_and_running; then
-            echo 'Error: PostgreSQL container "jrvs-psql" is already running.'
-            exit 1
-        fi
-
-        # Start the container
-        docker container start jrvs-psql >/dev/null 2>&1
-        echo "PostgreSQL container 'jrvs-psql' started."
-        ;;
-
-    stop)
-        # Check if container has been created
-        if [ $container_status -ne 0 ]; then
-            echo 'Error: PostgreSQL container "jrvs-psql" is not created.'
-            exit 1
-        fi
-
-        # Check if container is running
-        if ! container_exists_and_running; then
-            echo 'Error: PostgreSQL container "jrvs-psql" is not running.'
-            exit 1
-        fi
-
-        # Stop the container
-        docker container stop jrvs-psql >/dev/null 2>&1
-        echo "PostgreSQL container 'jrvs-psql' stopped."
-        ;;
-
-    *)
-        echo 'Error: Invalid command.'
-        echo 'Usage: ./psql_docker.sh {create <db_username> <db_password> | start | stop}'
-        exit 1
-        ;;
-esac
-
-exit 0
-
+exit $?
